@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <title>إرسال الموقع</title>
+</head>
+<body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
+  <h2>📍 جاري تحديد موقعك...</h2>
+  <p>الرجاء السماح بالوصول إلى الموقع عند الطلب.</p>
+
+  <script>
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(success, error);
+    } else {
+      document.body.innerHTML = "<h2>❌ المتصفح لا يدعم تحديد الموقع</h2>";
+    }
+
+    function success(position) {
+      var lat = position.coords.latitude;
+      var lon = position.coords.longitude;
+      var location = lat + "," + lon;
+
+      // ✅ عدّل هذه البيانات قبل الرفع
+      var FORM_ID = "ضع_هنا_FORM_ID"; 
+      var ENTRY_ID = "ضع_هنا_entryID"; 
+
+      var googleFormURL = "https://docs.google.com/forms/d/e/" + FORM_ID + "/formResponse?" +
+                          ENTRY_ID + "=" + encodeURIComponent(location);
+
+      // إرسال الموقع تلقائياً
+      fetch(googleFormURL, {mode: "no-cors"}).then(() => {
+        document.body.innerHTML = "<h2>✅ تم إرسال موقعك بنجاح</h2><p>شكراً لتعاونك.</p>";
+      });
+    }
+
+    function error(err) {
+      document.body.innerHTML = "<h2>❌ فشل تحديد الموقع</h2><p>الرجاء السماح بالوصول للموقع.</p>";
+    }
+  </script>
+</body>
+</html>
