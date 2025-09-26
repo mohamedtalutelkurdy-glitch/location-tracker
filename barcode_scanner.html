@@ -1,0 +1,257 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title> ماسح الباركود - بطاقة المزارع </title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; max-width:900px;margin:20px auto;padding:10px; }
+    video { width:100%; max-height:480px; background:#000; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .status { font-weight:700; margin:10px 0; }
+    table { width:100%; border-collapse:collapse; margin-top:10px;}
+    th,td { border:1px solid #ddd; padding:6px; text-align:left; font-size:13px;}
+    input[type=file] { display:block; }
+    .success { color:green } .error { color:red } .warn { color:orange }
+    .small { font-size:13px; color:#555 }
+  </style>
+</head>
+<body>
+  <h2>ماسح الباركود (بطاقة المزارع )</h2>
+  <p class="small">ارفع ملف قائمة الأكواد (CSV). الأعمدة: <code>code,scanned</code>. scanned: 0 أو 1.</p>
+
+  <div class="controls">
+    <label>رفع CSV الأكواد:
+      <input id="csvFile" type="file" accept=".csv,text/csv" />
+    </label>
+    <button id="startBtn">فتح الكاميرا وبدء المسح</button>
+    <button id="stopBtn" disabled>إيقاف الكاميرا</button>
+    <button id="exportCodesBtn" disabled>تحميل CSV الأكواد المحدث</button>
+    <button id="exportLogBtn" disabled>تحميل تقرير المسح</button>
+  </div>
+
+  <video id="video" autoplay muted playsinline></video>
+  <div class="status" id="status">الحالة: لم يبدأ المسح</div>
+
+  <div>
+    <label>نوع الباركود (اختياري): 
+      <select id="barcodeType">
+        <option value="any">أي نوع</option>
+        <option value="qr">QR</option>
+        <option value="code_128">Code 128</option>
+        <option value="ean">EAN/UPC</option>
+      </select>
+    </label>
+  </div>
+
+  <h3>تقرير آخر المسحّات</h3>
+  <table id="logTable">
+    <thead><tr><th>الوقت</th><th>الكود المقروء</th><th>النتيجة</th><th>ملاحظة</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+<script type="module">
+  // نستخدم مكتبة ZXing عبر CDN
+  import { BrowserMultiFormatReader } from 'https://unpkg.com/@zxing/library@0.19.1/esm/index.js';
+
+  const video = document.getElementById('video');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const csvFileInput = document.getElementById('csvFile');
+  const statusDiv = document.getElementById('status');
+  const exportLogBtn = document.getElementById('exportLogBtn');
+  const exportCodesBtn = document.getElementById('exportCodesBtn');
+  const logTableBody = document.querySelector('#logTable tbody');
+  const barcodeTypeSelect = document.getElementById('barcodeType');
+
+  const codeReader = new BrowserMultiFormatReader();
+  let selectedDeviceId = null;
+  let stream = null;
+  let scanning = false;
+
+  // قاعدة الأكواد في الذاكرة: { codeString: { scanned: 0/1, meta... } }
+  let codesDB = {};
+  let logs = [];
+
+  function parseCSV(text) {
+    // بسيط: يفترض صف أول رؤوس أو بدون رؤوس
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l=>l!=='');
+    const rows = lines.map(l => l.split(',').map(c => c.trim()));
+    // إذا الرأس يحتوي "code" نعاملها كعنوان
+    let startIndex = 0;
+    let headers = null;
+    if (rows.length && rows[0][0].toLowerCase() === 'code') {
+      headers = rows[0].map(h => h.toLowerCase());
+      startIndex = 1;
+    }
+    const out = [];
+    for (let i=startIndex;i<rows.length;i++){
+      const r = rows[i];
+      if (r.length===0) continue;
+      if (headers) {
+        const obj = {};
+        headers.forEach((h,idx)=> obj[h] = r[idx] ?? '');
+        out.push(obj);
+      } else {
+        out.push({ code: r[0] ?? '', scanned: r[1] ?? '0' });
+      }
+    }
+    return out;
+  }
+
+  function loadCodesFromCSVText(text) {
+    const rows = parseCSV(text);
+    codesDB = {};
+    for (const r of rows) {
+      const code = (r.code ?? '').toString();
+      if (!code) continue;
+      const scanned = (r.scanned=='1' || r.scanned.toLowerCase()==='true') ? 1 : 0;
+      codesDB[code] = { scanned };
+    }
+    statusDiv.innerHTML = `تم تحميل ${Object.keys(codesDB).length} رمزًا.`;
+    exportCodesBtn.disabled = false;
+  }
+
+  csvFileInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => loadCodesFromCSVText(reader.result);
+    reader.readAsText(f);
+  });
+
+  async function startCameraAndScan() {
+    if (scanning) return;
+    try {
+      // اختر الكاميرا الخلفية إن وُجدت
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(d => d.kind === 'videoinput');
+      let constraints = { video: { facingMode: 'environment' } };
+      if (videoInputs.length && selectedDeviceId) {
+        constraints = { video: { deviceId: { exact: selectedDeviceId } } };
+      }
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = stream;
+      await video.play();
+      scanning = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusDiv.innerHTML = 'المسح جارٍ... أمسك الكاميرا على الباركود';
+      exportLogBtn.disabled = false;
+      scanLoop();
+    } catch (err) {
+      console.error(err);
+      statusDiv.innerHTML = 'خطأ بفتح الكاميرا: ' + (err.message || err);
+    }
+  }
+
+  async function stopCamera() {
+    scanning = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    statusDiv.innerHTML = 'المسح متوقّف';
+    if (stream) {
+      stream.getTracks().forEach(t=>t.stop());
+      stream = null;
+    }
+  }
+
+  async function scanLoop() {
+    if (!scanning) return;
+    try {
+      // نأخذ إطار واحد من الفيديو ونحاول قراءته
+      const zxRes = await codeReader.decodeOnceFromVideoElement(video);
+      if (zxRes) {
+        handleScannedCode(zxRes.text);
+        // بعد القراءة نترك القليل من الوقت لإعادة قراءة مختلف أو لمنع الازدواج
+        await new Promise(r=>setTimeout(r, 800));
+      }
+    } catch (err) {
+      // أخطاء القراءة الشائعة: لا شيء في الإطار، نتابع
+      // console.debug('no code in frame');
+    }
+    // استمرار الحلقة
+    if (scanning) requestAnimationFrame(scanLoop);
+  }
+
+  function addLog(code, result, note='') {
+    const t = new Date().toISOString();
+    logs.unshift({ time: t, code, result, note });
+    renderLogs();
+  }
+
+  function renderLogs() {
+    logTableBody.innerHTML = '';
+    for (const row of logs.slice(0,200)) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${row.time}</td><td>${escapeHtml(row.code)}</td><td>${row.result}</td><td>${escapeHtml(row.note)}</td>`;
+      logTableBody.appendChild(tr);
+    }
+  }
+
+  function escapeHtml(s='') {
+    return (s+'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function handleScannedCode(rawCode) {
+    const code = rawCode.trim();
+    // التحقّق في قاعدة البيانات
+    if (!codesDB || Object.keys(codesDB).length===0) {
+      addLog(code, 'خطأ', 'قاعدة الأكواد غير محملة');
+      statusDiv.innerHTML = '<span class="error">يجب رفع CSV الأكواد أولاً.</span>';
+      return;
+    }
+    const rec = codesDB[code];
+    if (!rec) {
+      addLog(code, 'خطأ', 'الكود غير موجود في القاعدة');
+      statusDiv.innerHTML = `<span class="error">الكود ${escapeHtml(code)} غير موجود في القاعدة.</span>`;
+      return;
+    }
+    if (rec.scanned==1) {
+      addLog(code, 'مرفوض', 'تم مسحه مسبقًا');
+      statusDiv.innerHTML = `<span class="warn">الرمز ${escapeHtml(code)} مُسح سابقًا.</span>`;
+      return;
+    }
+    // ناجح: نعلّم أنه تم مسحه الآن
+    rec.scanned = 1;
+    addLog(code, 'ناجح', 'تم المسح وتحديث الحالة');
+    statusDiv.innerHTML = `<span class="success">تمت العملية بنجاح للرمز ${escapeHtml(code)}</span>`;
+  }
+
+  // أدوات التصدير
+  function downloadText(filename, text) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], {type:'text/csv'}));
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  exportLogBtn.addEventListener('click', () => {
+    if (logs.length===0) { alert('لا سجلات للتصدير'); return; }
+    const rows = [['time','code','result','note']];
+    for (const r of logs) rows.push([r.time, r.code, r.result, r.note]);
+    const csv = rows.map(r => r.map(x=>`"${(x||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
+    downloadText('scan_log.csv', csv);
+  });
+
+  exportCodesBtn.addEventListener('click', () => {
+    // نصدر codesDB إلى CSV
+    const rows = [['code','scanned']];
+    for (const code of Object.keys(codesDB)) {
+      rows.push([code, codesDB[code].scanned ? '1' : '0']);
+    }
+    const csv = rows.map(r => r.map(x=>`"${(x||'').toString().replace(/"/g,'""')}"`).join(',')).join('\n');
+    downloadText('codes_export.csv', csv);
+  });
+
+  startBtn.addEventListener('click', startCameraAndScan);
+  stopBtn.addEventListener('click', stopCamera);
+
+  // ملاحظة: لو تريد قراءة أنواع محددة فقط يمكن تعديل decodeers لكن ZXing يدعم الكثير تلقائياً.
+
+  // نهاية module
+</script>
+</body>
+</html>
